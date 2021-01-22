@@ -1,6 +1,8 @@
 from BiliClient import asyncbili
 from .push_message_task import webhook
-import logging, asyncio
+import logging
+from asyncio import TimeoutError, sleep
+from concurrent.futures import CancelledError
 from async_timeout import timeout
 from typing import Awaitable, Tuple
 
@@ -39,6 +41,7 @@ async def judgement_task(biliapi: asyncbili,
     Timeout = task_config.get("timeout", 850)
     run_once = task_config.get("run_once", False)
 
+    over = False
     su = 0
     try:
         async with timeout(Timeout):
@@ -46,14 +49,17 @@ async def judgement_task(biliapi: asyncbili,
                 while True:
                     try:
                         ret = await biliapi.juryCaseObtain()
+                    except CancelledError as e:
+                        raise e
                     except Exception as e:
                         logging.warning(f'{biliapi.name}: 获取风纪委员案件异常，原因为{str(e)}，跳过本次投票')
                         break
                     if ret["code"] == 25008:
-                        logging.warning(f'{biliapi.name}: 风纪委员没有新案件了')
+                        logging.info(f'{biliapi.name}: 风纪委员没有新案件了')
                         break
                     elif ret["code"] == 25014:
-                        logging.warning(f'{biliapi.name}: 风纪委员案件已审满')
+                        over = True
+                        logging.info(f'{biliapi.name}: 风纪委员案件已审满')
                         break
                     elif ret["code"] != 0:
                         logging.warning(f'{biliapi.name}: 获取风纪委员案件失败，信息为：{ret["message"]}')
@@ -63,6 +69,8 @@ async def judgement_task(biliapi: asyncbili,
                     default = True
                     try:
                         ret = await biliapi.juryCase(cid)
+                    except CancelledError as e:
+                        raise e
                     except Exception as e:
                         logging.warning(f'{biliapi.name}: 获取风纪委员案件他人投票结果异常，原因为{str(e)}，使用默认投票参数')
                     else:
@@ -77,6 +85,8 @@ async def judgement_task(biliapi: asyncbili,
 
                     try:
                         ret = await biliapi.juryVote(cid, **params) #将参数params展开后传参
+                    except CancelledError as e:
+                        raise e
                     except Exception as e:
                         logging.warning(f'{biliapi.name}: 风纪委员投票id为{cid}的案件异常，原因为{str(e)}')
                     else:
@@ -85,19 +95,20 @@ async def judgement_task(biliapi: asyncbili,
                             if default:
                                 logging.info(f'{biliapi.name}: 风纪委员成功为id为{cid}的案件投({voteInfo[params["vote"]]})票')
                             else:
-                                assert params["vote"] == vote[0][0]
                                 logging.info(f'{biliapi.name}: 风纪委员成功为id为{cid}的案件投({voteInfo[params["vote"]]})票，当前案件投票数({voteInfo[vote[0][0]]}{vote[0][1]}票),({voteInfo[vote[1][0]]}{vote[1][1]}票),({voteInfo[vote[2][0]]}{vote[2][1]}票)')
                         else:   
                             logging.warning(f'{biliapi.name}: 风纪委员投票id为{cid}的案件失败，信息为：{ret["message"]}')
 
-                if run_once or su >= vote_num:
+                if over or run_once or su >= vote_num:
                     logging.info(f'{biliapi.name}: 风纪委员投票成功完成{su}次后退出')
                     break
                 else:
                     logging.info(f'{biliapi.name}: 风纪委员投票等待{check_interval}s后继续获取案件')
-                    await asyncio.sleep(check_interval)
+                    await sleep(check_interval)
 
-    except asyncio.TimeoutError:
-        logging.warning(f'{biliapi.name}: 风纪委员投票任务超时({Timeout}秒)退出')
+    except TimeoutError:
+        logging.info(f'{biliapi.name}: 风纪委员投票任务超时({Timeout}秒)退出')
+    except CancelledError:
+        logging.warning(f'{biliapi.name}: 风纪委员投票任务被强制取消')
 
     webhook.addMsg('msg_simple', f'{biliapi.name}:风纪委投票成功{su}次\n')
